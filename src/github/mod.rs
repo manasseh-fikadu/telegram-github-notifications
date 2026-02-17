@@ -1,4 +1,6 @@
-use serde::Deserialize;
+use std::collections::HashMap;
+
+use serde::{de::DeserializeOwned, Deserialize};
 
 #[derive(Debug, Clone)]
 pub struct GitHubEvent {
@@ -9,14 +11,14 @@ pub struct GitHubEvent {
     pub payload: EventPayload,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[allow(dead_code)]
 pub struct Repository {
     pub full_name: String,
     pub html_url: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct User {
     pub login: String,
     pub html_url: String,
@@ -102,18 +104,34 @@ pub struct ReleasePayload {
 
 impl GitHubEvent {
     pub fn parse(event_type: &str, body: &[u8]) -> anyhow::Result<Self> {
-        let value: serde_json::Value = serde_json::from_slice(body)?;
+        let value = parse_request_body(body)?;
 
         let action = value
             .get("action")
             .and_then(|v| v.as_str())
             .map(String::from);
 
-        let repo: Repository =
-            serde_json::from_value(value.get("repository").cloned().unwrap_or_default())?;
+        let mut repo: Repository = serde_json::from_value(
+            value.get("repository").cloned().unwrap_or_default(),
+        )
+        .unwrap_or_default();
+        if repo.full_name.is_empty() {
+            repo.full_name = "unknown/repository".to_string();
+        }
+        if repo.html_url.is_empty() {
+            repo.html_url = "https://github.com".to_string();
+        }
 
-        let sender: User =
-            serde_json::from_value(value.get("sender").cloned().unwrap_or_default())?;
+        let mut sender: User = serde_json::from_value(
+            value.get("sender").cloned().unwrap_or_default(),
+        )
+        .unwrap_or_default();
+        if sender.login.is_empty() {
+            sender.login = "unknown".to_string();
+        }
+        if sender.html_url.is_empty() {
+            sender.html_url = "https://github.com".to_string();
+        }
 
         let payload = Self::parse_payload(event_type, &value);
 
@@ -129,35 +147,35 @@ impl GitHubEvent {
     fn parse_payload(event_type: &str, value: &serde_json::Value) -> EventPayload {
         match event_type {
             "pull_request" => {
-                if let Ok(pr) = serde_json::from_value(value.clone()) {
+                if let Some(pr) = parse_nested(value, Some("pull_request")) {
                     EventPayload::PullRequest(pr)
                 } else {
                     EventPayload::Unknown
                 }
             }
             "issues" => {
-                if let Ok(issue) = serde_json::from_value(value.clone()) {
+                if let Some(issue) = parse_nested(value, Some("issue")) {
                     EventPayload::Issue(issue)
                 } else {
                     EventPayload::Unknown
                 }
             }
             "push" => {
-                if let Ok(push) = serde_json::from_value(value.clone()) {
+                if let Some(push) = parse_nested(value, None) {
                     EventPayload::Push(push)
                 } else {
                     EventPayload::Unknown
                 }
             }
             "workflow_run" => {
-                if let Ok(workflow) = serde_json::from_value(value.clone()) {
+                if let Some(workflow) = parse_nested(value, Some("workflow_run")) {
                     EventPayload::WorkflowRun(workflow)
                 } else {
                     EventPayload::Unknown
                 }
             }
             "release" => {
-                if let Ok(release) = serde_json::from_value(value.clone()) {
+                if let Some(release) = parse_nested(value, Some("release")) {
                     EventPayload::Release(release)
                 } else {
                     EventPayload::Unknown
@@ -267,4 +285,25 @@ impl GitHubEvent {
             }
         }
     }
+}
+
+fn parse_request_body(body: &[u8]) -> anyhow::Result<serde_json::Value> {
+    if let Ok(value) = serde_json::from_slice(body) {
+        return Ok(value);
+    }
+
+    let form: HashMap<String, String> = serde_urlencoded::from_bytes(body)?;
+    let payload = form
+        .get("payload")
+        .ok_or_else(|| anyhow::anyhow!("missing payload field in form body"))?;
+    let value: serde_json::Value = serde_json::from_str(payload)?;
+    Ok(value)
+}
+
+fn parse_nested<T: DeserializeOwned>(value: &serde_json::Value, field: Option<&str>) -> Option<T> {
+    let source = match field {
+        Some(key) => value.get(key)?.clone(),
+        None => value.clone(),
+    };
+    serde_json::from_value(source).ok()
 }

@@ -18,3 +18,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tower = "0.4"
 tower-http = { version = "0.5", features = ["trace"] }
 anyhow = "1"
+serde_urlencoded = "0.7"
